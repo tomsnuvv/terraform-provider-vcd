@@ -2,9 +2,7 @@ package vcd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -163,26 +161,25 @@ func resourceVcdNsxtFirewallRuleCreate(ctx context.Context, d *schema.ResourceDa
 
 	rule := getNsxtFirewallRuleFromSchema(d)
 
-	endpoint, err := vcdClient.Client.OpenApiBuildEndpoint(fmt.Sprintf("%s/edgeGateways/%s/firewall/rules", types.OpenApiPathVersion2_0_0, edgeGatewayId))
+	endpoint, err := vcdClient.Client.OpenApiBuildEndpoint(fmt.Sprintf("%sedgeGateways/%s/firewall/rules/", types.OpenApiPathVersion2_0_0, edgeGatewayId))
+	minimumApiVersion := "39.1"
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
-	if aboveRuleId, ok := d.GetOk("above_rule_id"); ok {
-		// This is a guess on the parameter name used by VCD API
-		endpoint.RawQuery = fmt.Sprintf("aboveRuleId=%s", aboveRuleId.(string))
+	// This API endpoints returns the wrong owner object. We can get the correct ID from the task details.
+	task, err := vcdClient.Client.OpenApiPostItemAsync(minimumApiVersion, endpoint, nil, rule)
+	if err != nil {
+		return diag.FromErr(err)
 	}
 
-	jsonPayload, err := json.Marshal(rule)
+	err = task.WaitTaskCompletion()
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
 	returnReq := &NsxtFirewallRuleV2{}
-	_, err = vcdClient.Client.ExecuteRequestWithApiVersion(endpoint.String(), http.MethodPost, string(jsonPayload), "error creating NSX-T Firewall Rule: %s", nil, returnReq, "39.1")
-	if err != nil {
-		return diag.FromErr(err)
-	}
+	returnReq.ID = task.Task.Details
 
 	d.SetId(returnReq.ID)
 
@@ -191,22 +188,11 @@ func resourceVcdNsxtFirewallRuleCreate(ctx context.Context, d *schema.ResourceDa
 
 func resourceVcdNsxtFirewallRuleRead(_ context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	vcdClient := meta.(*VCDClient)
-	orgName := d.Get("org").(string)
 	edgeGatewayId := d.Get("edge_gateway_id").(string)
 	ruleId := d.Id()
 
 	if ruleId == "" {
 		return diag.Errorf("empty Firewall Rule ID")
-	}
-
-	// Confirm Edge Gateway exists and we have access
-	_, err := vcdClient.GetNsxtEdgeGatewayById(orgName, edgeGatewayId)
-	if err != nil {
-		if govcd.ContainsNotFound(err) {
-			d.SetId("")
-			return nil
-		}
-		return diag.Errorf("error retrieving Edge Gateway: %s", err)
 	}
 
 	endpoint := fmt.Sprintf(types.OpenApiPathVersion2_0_0+types.OpenApiEndpointNsxtFirewallRules, edgeGatewayId)
@@ -238,35 +224,30 @@ func resourceVcdNsxtFirewallRuleUpdate(ctx context.Context, d *schema.ResourceDa
 	edgeGatewayId := d.Get("edge_gateway_id").(string)
 	ruleId := d.Id()
 
-	// Confirm Edge Gateway exists
 	_, err := vcdClient.GetNsxtEdgeGatewayById(orgName, edgeGatewayId)
 	if err != nil {
 		return diag.Errorf("error retrieving Edge Gateway: %s", err)
 	}
-
 	rule := getNsxtFirewallRuleFromSchema(d)
 	rule.ID = ruleId
 
-	endpoint, err := vcdClient.Client.OpenApiBuildEndpoint(fmt.Sprintf("%sedgeGateways/%s/firewall/rules/%s", types.OpenApiPathVersion2_0_0, edgeGatewayId, ruleId))
+	endpoint := fmt.Sprintf(types.OpenApiPathVersion2_0_0+types.OpenApiEndpointNsxtFirewallRules, edgeGatewayId)
+	minimumApiVersion := "39.1"
 
+	urlRef, err := vcdClient.Client.OpenApiBuildEndpoint(fmt.Sprintf(endpoint+"/%s", ruleId))
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
 	existingRule := &NsxtFirewallRuleV2{}
-	_, err = vcdClient.Client.ExecuteRequestWithApiVersion(endpoint.String(), http.MethodGet, "", "error retrieving NSX-T Firewall Rule for update: %s", nil, existingRule, "39.1")
+	err = vcdClient.Client.OpenApiGetItem(minimumApiVersion, urlRef, nil, existingRule, nil)
 	if err != nil {
 		return diag.FromErr(err)
 	}
 	rule.Version = existingRule.Version
 
-	jsonPayload, err := json.Marshal(rule)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
 	returnReq := &NsxtFirewallRuleV2{}
-	_, err = vcdClient.Client.ExecuteRequestWithApiVersion(endpoint.String(), http.MethodPut, string(jsonPayload), "error updating NSX-T Firewall Rule: %s", nil, returnReq, "39.1")
+	err = vcdClient.Client.OpenApiPutItem(minimumApiVersion, urlRef, nil, rule, returnReq, nil)
 	if err != nil {
 		return diag.FromErr(err)
 	}
@@ -289,11 +270,12 @@ func resourceVcdNsxtFirewallRuleDelete(_ context.Context, d *schema.ResourceData
 	}
 
 	endpoint, err := vcdClient.Client.OpenApiBuildEndpoint(fmt.Sprintf("%sedgeGateways/%s/firewall/rules/%s", types.OpenApiPathVersion2_0_0, edgeGatewayId, ruleId))
+	minimumApiVersion := "39.1"
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
-	_, err = vcdClient.Client.ExecuteRequestWithApiVersion(endpoint.String(), http.MethodDelete, "", "error deleting NSX-T Firewall Rule: %s", nil, nil, "39.1")
+	err = vcdClient.Client.OpenApiDeleteItem(minimumApiVersion, endpoint, nil, nil)
 	if err != nil {
 		if govcd.ContainsNotFound(err) {
 			return nil
